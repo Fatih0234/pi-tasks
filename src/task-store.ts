@@ -314,6 +314,18 @@ export class TaskStore {
         changedFields.push("blockedBy");
       }
 
+      // Warn when moving to in_progress/completed with open blockers (issue #71).
+      // Matches TaskExecute semantics: a missing blocker counts as open.
+      if ((fields.status === "in_progress" || fields.status === "completed") && task.blockedBy.length > 0) {
+        const openBlockers = task.blockedBy.filter(bid => {
+          const blocker = this.tasks.get(bid);
+          return !blocker || blocker.status !== "completed";
+        });
+        if (openBlockers.length > 0) {
+          warnings.push(`#${id} blocked by ${openBlockers.map(bid => `#${bid}`).join(", ")}`);
+        }
+      }
+
       task.updatedAt = Date.now();
       return { task, changedFields, warnings };
     });
