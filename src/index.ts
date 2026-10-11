@@ -595,6 +595,13 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Stop the spinner interval when the session ends. A live interval keeps the
+  // event loop busy, so `pi -p` never exits once a task has been in progress.
+  // new/resume/fork re-run session_start, whose update() restarts it if needed.
+  pi.on("session_shutdown", async () => {
+    widget.dispose();
+  });
+
   // Fallback for hosts that init UI lazily. Guarded by persistedTasksShown, so
   // it never double-renders after session_start.
   pi.on("before_agent_start", async (_event, ctx) => {
