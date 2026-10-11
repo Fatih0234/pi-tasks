@@ -217,9 +217,11 @@ export default function (pi: ExtensionAPI) {
       .then(d => { debug("spawn:ok", d); return d.id; });
   }
 
-  /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
+  /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension).
+   *  Rejects when the stop is refused or times out — callers must not treat the
+   *  agent as stopped until this resolves (issues #46/#69). */
   function stopSubagent(agentId: string): Promise<void> {
-    return rpcCall<void>("subagents:rpc:stop", { agentId }, 10_000).catch(() => {});
+    return rpcCall<void>("subagents:rpc:stop", { agentId }, 10_000);
   }
 
   /** Tell subagents its result has been handed to the model, which suppresses the
@@ -1101,9 +1103,15 @@ Set up task dependencies:
         }
         const task = store.get(resolvedId);
         if (task?.metadata?.agentId && task.status === "in_progress") {
+          // Commit the completion only after the stop lands: the stop RPC going
+          // unanswered must not read as success with the agent still running.
+          try {
+            await stopSubagent(task.metadata.agentId);
+          } catch (err: any) {
+            throw new Error(`Failed to stop agent ${task.metadata.agentId} for task #${resolvedId}: ${err.message}`);
+          }
           store.update(resolvedId, { status: "completed" });
           autoClear.trackCompletion(resolvedId, cadence.currentTurn);
-          await stopSubagent(task.metadata.agentId);
           widget.setActiveTask(resolvedId, false);
           widget.update();
           return textResult(`Task #${resolvedId} stopped successfully`);

@@ -907,7 +907,7 @@ describe("RPC protocol correctness", () => {
     rpc.unsub();
   });
 
-  it("stop RPC returns false on error (agent not found) without throwing", async () => {
+  it("stop RPC failure on error (agent not found) throws and keeps in_progress", async () => {
     const mock = mockPi();
     const rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
@@ -923,14 +923,16 @@ describe("RPC protocol correctness", () => {
     // Clear spawned list so the mock's stop handler won't find the agent
     rpc.spawned.length = 0;
 
-    // TaskStop should still succeed (stopSubagent catches the error)
-    const result = await mock.executeTool("TaskStop", { task_id: "1" });
-    expect(result.content[0].text).toContain("stopped successfully");
+    // TaskStop must not report success: the stop was refused, agent may be live.
+    await expect(mock.executeTool("TaskStop", { task_id: "1" }))
+      .rejects.toThrow("Failed to stop agent agent-1 for task #1");
+    const get = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(get.content[0].text).toContain("Status: in_progress");
 
     rpc.unsub();
   });
 
-  it("stop RPC returns false on timeout without throwing", async () => {
+  it("stop RPC timeout throws and keeps in_progress", async () => {
     const mock = mockPi();
     initExtension(mock.pi as any);
 
@@ -951,11 +953,15 @@ describe("RPC protocol correctness", () => {
 
     vi.useFakeTimers();
     const stopPromise = mock.executeTool("TaskStop", { task_id: "1" });
+    // Attach the rejection handler before advancing: otherwise the timeout
+    // rejection fires with no handler attached and reads as unhandled.
+    const assertion = expect(stopPromise).rejects.toThrow("Failed to stop agent ghost-agent for task #1");
     await vi.advanceTimersByTimeAsync(11000);
 
-    // Should resolve (not throw) — stopSubagent catches timeout
-    const result = await stopPromise;
-    expect(result.content[0].text).toContain("stopped successfully");
+    // Must reject (not resolve): an unanswered stop is not a successful stop.
+    await assertion;
+    const get = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(get.content[0].text).toContain("Status: in_progress");
 
     vi.useRealTimers();
   });

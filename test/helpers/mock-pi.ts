@@ -132,7 +132,7 @@ export function mockSessionCtx(sessionId: string, opts?: { persisted?: boolean; 
  */
 export function installSubagentsMock(
   pi: { events: MockEventBus },
-  opts?: { spawnError?: string; version?: number; withoutConsume?: boolean },
+  opts?: { spawnError?: string; stopError?: string; version?: number; withoutConsume?: boolean },
 ) {
   let idCounter = 0;
   const spawned: Array<{ id: string; type: string; prompt: string; options: any }> = [];
@@ -163,6 +163,10 @@ export function installSubagentsMock(
   // Respond to stop — reply on scoped channel
   const unsubStop = pi.events.on("subagents:rpc:stop", (data: unknown) => {
     const { requestId, agentId } = data as { requestId: string; agentId: string };
+    if (opts?.stopError) {
+      pi.events.emit(`subagents:rpc:stop:reply:${requestId}`, { success: false, error: opts.stopError });
+      return;
+    }
     const known = spawned.some(s => s.id === agentId);
     if (known) {
       stopped.push(agentId);
