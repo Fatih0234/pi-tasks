@@ -808,7 +808,7 @@ Returns full task details:
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const task = store.get(params.taskId);
-      if (!task) throw new Error(`Task #${params.taskId} not found`);
+      if (!task) throw new Error(`Task #${sanitizeField(String(params.taskId)).slice(0, 100)} not found`);
 
       // Unescape literal \n sequences the LLM may have double-escaped in JSON
       const desc = task.description.replace(/\\n/g, "\n");
@@ -951,7 +951,7 @@ Set up task dependencies:
       const { task, changedFields, warnings } = store.update(taskId, fields);
 
       if (changedFields.length === 0 && !task) {
-        throw new Error(`Task #${taskId} not found`);
+        throw new Error(`Task #${sanitizeField(String(taskId)).slice(0, 100)} not found`);
       }
 
       // Update widget active task tracking
