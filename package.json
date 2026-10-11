@@ -26,10 +26,8 @@
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.5",
-    "@earendil-works/pi-tui": ">=0.80.5"
-  },
-  "dependencies": {
-    "typebox": "^1.1.34"
+    "@earendil-works/pi-tui": ">=0.80.5",
+    "typebox": "*"
   },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
@@ -45,6 +43,7 @@
     "@earendil-works/pi-coding-agent": "0.84.2",
     "@earendil-works/pi-tui": "0.84.2",
     "@types/node": "^25.0.0",
+    "typebox": "^1.1.34",
     "typescript": "^6.0.0",
     "vitest": "^4.1.5"
   },
