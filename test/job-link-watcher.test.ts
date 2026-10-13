@@ -41,15 +41,15 @@ function settled(
 describe("job link watcher (pure matcher)", () => {
   it("pairs started+settled with task_id into one settled outcome (verbatim task_id, numeric exitCode)", () => {
     const lines = [
-      parseLinkLine(started("job-abc123", "5")),
-      parseLinkLine(settled("job-abc123", "5", 0)),
+      parseLinkLine(started("job-1-ab12", "5")),
+      parseLinkLine(settled("job-1-ab12", "5", 0)),
     ];
     const outcomes = pairLinkEvents(lines, NOW);
     expect(outcomes).toHaveLength(1);
     const outcome = outcomes[0];
     expect(outcome).toMatchObject({
       kind: "settled",
-      job_id: "job-abc123",
+      job_id: "job-1-ab12",
       task_id: "5",
       exitCode: 0,
       status: "completed",
@@ -60,8 +60,8 @@ describe("job link watcher (pure matcher)", () => {
 
   it("yields nothing for lines without task_id", () => {
     const lines = [
-      parseLinkLine(started("job-notask")),
-      parseLinkLine(settled("job-notask", undefined, 0)),
+      parseLinkLine(started("job-2-ab12")),
+      parseLinkLine(settled("job-2-ab12", undefined, 0)),
     ];
     expect(pairLinkEvents(lines, NOW)).toEqual([]);
     expect(getPendingStarts(lines, NOW)).toEqual([]);
@@ -69,9 +69,9 @@ describe("job link watcher (pure matcher)", () => {
 
   it("marks malformed JSON as malformed without throwing, and counts it", () => {
     const raw = [
-      started("job-1", "1"),
+      started("job-3-c001", "1"),
       "not json {{{",
-      settled("job-1", "1", 0),
+      settled("job-3-c001", "1", 0),
     ];
     const parsed = raw.map((line) => parseLinkLine(line));
     expect(parsed[1]).toEqual({ malformed: true });
@@ -82,39 +82,39 @@ describe("job link watcher (pure matcher)", () => {
 
   it("flags duplicate started with one duplicate-start flag", () => {
     const lines = [
-      parseLinkLine(started("job-dup", "2")),
-      parseLinkLine(started("job-dup", "2")),
+      parseLinkLine(started("job-2-c3d4", "2")),
+      parseLinkLine(started("job-2-c3d4", "2")),
     ];
     const outcomes = pairLinkEvents(lines, NOW);
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]).toMatchObject({
       kind: "flag",
       reason: "duplicate-start",
-      job_id: "job-dup",
+      job_id: "job-2-c3d4",
     });
   });
 
   it("flags settled with no started as orphan-settle", () => {
-    const lines = [parseLinkLine(settled("job-ghost", "3", 1, "error"))];
+    const lines = [parseLinkLine(settled("job-3-ef01", "3", 1, "error"))];
     const outcomes = pairLinkEvents(lines, NOW);
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]).toMatchObject({
       kind: "flag",
       reason: "orphan-settle",
-      job_id: "job-ghost",
+      job_id: "job-3-ef01",
     });
   });
 
   it("passes exitCode null (spawn_error shape) through as null", () => {
     const lines = [
-      parseLinkLine(started("job-spawn", "4")),
-      parseLinkLine(settled("job-spawn", "4", null, "spawn_error")),
+      parseLinkLine(started("job-4-001a", "4")),
+      parseLinkLine(settled("job-4-001a", "4", null, "spawn_error")),
     ];
     const outcomes = pairLinkEvents(lines, NOW);
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]).toMatchObject({
       kind: "settled",
-      job_id: "job-spawn",
+      job_id: "job-4-001a",
       task_id: "4",
       exitCode: null,
       status: "spawn_error",
@@ -122,11 +122,11 @@ describe("job link watcher (pure matcher)", () => {
   });
 
   it("leaves started-without-settle pending and exposes it for expiry (Task 3)", () => {
-    const lines = [parseLinkLine(started("job-hang", "7"))];
+    const lines = [parseLinkLine(started("job-7-00b7", "7"))];
     expect(pairLinkEvents(lines, NOW)).toEqual([]);
     const pending = getPendingStarts(lines, NOW);
     expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({ job_id: "job-hang", task_id: "7" });
+    expect(pending[0]).toMatchObject({ job_id: "job-7-00b7", task_id: "7" });
 
     const combined = pairLinkEventsWithPending(lines, NOW);
     expect(combined.outcomes).toEqual([]);
@@ -183,26 +183,26 @@ describe("job link watcher expiry + would-write (Task 3)", () => {
 
   it("late settle pairs normally and additionally flags late-settle", () => {
     const lines = [
-      parseLinkLine(started("job-late", "9", NOW - 25 * HOUR_MS)),
-      parseLinkLine(settled("job-late", "9", 0, "completed", NOW)),
+      parseLinkLine(started("job-9-1a2b", "9", NOW - 25 * HOUR_MS)),
+      parseLinkLine(settled("job-9-1a2b", "9", 0, "completed", NOW)),
     ];
     expect(pairLinkEvents(lines, NOW)).toEqual([
       {
         kind: "settled",
-        job_id: "job-late",
+        job_id: "job-9-1a2b",
         task_id: "9",
         exitCode: 0,
         status: "completed",
         ts: NOW,
       },
-      { kind: "flag", reason: "late-settle", job_id: "job-late", task_id: "9" },
+      { kind: "flag", reason: "late-settle", job_id: "job-9-1a2b", task_id: "9" },
     ]);
   });
 
   it("fresh settle pairs with no late-settle flag", () => {
     const lines = [
-      parseLinkLine(started("job-quick", "9", NOW - HOUR_MS)),
-      parseLinkLine(settled("job-quick", "9", 0, "completed", NOW)),
+      parseLinkLine(started("job-9-3c4d", "9", NOW - HOUR_MS)),
+      parseLinkLine(settled("job-9-3c4d", "9", 0, "completed", NOW)),
     ];
     expect(pairLinkEvents(lines, NOW)).toHaveLength(1);
   });
@@ -212,7 +212,7 @@ describe("job link watcher expiry + would-write (Task 3)", () => {
     const payload = buildWouldWrite(
       {
         kind: "settled",
-        job_id: "job-abc123",
+        job_id: "job-1-ab12",
         task_id: "5",
         exitCode: 0,
         status: "completed",
@@ -226,7 +226,7 @@ describe("job link watcher expiry + would-write (Task 3)", () => {
     expect(payload).toEqual({
       task_id: "5",
       metadata_key: "asyncBashOutcomes",
-      note: { job_id: "job-abc123", exitCode: 0, status: "completed", ts: NOW },
+      note: { job_id: "job-1-ab12", exitCode: 0, status: "completed", ts: NOW },
     });
     expect(seen).toEqual(["5"]);
   });
@@ -235,7 +235,7 @@ describe("job link watcher expiry + would-write (Task 3)", () => {
     const payload = buildWouldWrite(
       {
         kind: "settled",
-        job_id: "job-gone",
+        job_id: "job-8-beef",
         task_id: "404",
         exitCode: 0,
         status: "completed",
@@ -265,5 +265,74 @@ describe("job link watcher expiry + would-write (Task 3)", () => {
       ),
     ).toBeNull();
     expect(calls).toBe(0);
+  });
+});
+
+describe("job link watcher job_id conformance (hardening)", () => {
+  it("rejects the forged non-conforming ID as malformed", () => {
+    const forged =
+      '{"event":"started","job_id":"job-3-818148","command":"sleep 25","task_id":"3","ts":1791923955813}';
+    expect(parseLinkLine(forged)).toEqual({ malformed: true });
+  });
+
+  it("rejects a 3-hex suffix as malformed", () => {
+    const line = JSON.stringify({ event: "started", job_id: "job-1-abc", task_id: "1", ts: NOW });
+    expect(parseLinkLine(line)).toEqual({ malformed: true });
+  });
+
+  it("rejects a 5-hex suffix as malformed", () => {
+    const line = JSON.stringify({ event: "started", job_id: "job-1-abcde", task_id: "1", ts: NOW });
+    expect(parseLinkLine(line)).toEqual({ malformed: true });
+  });
+
+  it("rejects uppercase hex as malformed", () => {
+    const line = JSON.stringify({ event: "started", job_id: "job-1-AB12", task_id: "1", ts: NOW });
+    expect(parseLinkLine(line)).toEqual({ malformed: true });
+  });
+
+  it("rejects a missing job_id as malformed", () => {
+    const line = JSON.stringify({ event: "started", task_id: "1", ts: NOW });
+    expect(parseLinkLine(line)).toEqual({ malformed: true });
+  });
+
+  it("rejects a non-string job_id as malformed", () => {
+    const line = JSON.stringify({ event: "started", job_id: 123, task_id: "1", ts: NOW });
+    expect(parseLinkLine(line)).toEqual({ malformed: true });
+  });
+
+  it("rejects a forged settled line as malformed", () => {
+    const line = JSON.stringify({
+      event: "settled",
+      job_id: "job-3-818148",
+      task_id: "3",
+      exitCode: 0,
+      status: "completed",
+      ts: NOW,
+    });
+    expect(parseLinkLine(line)).toEqual({ malformed: true });
+  });
+
+  it("counts a forged pair as malformed with no outcome (no false pairing)", () => {
+    const forgedStart =
+      '{"event":"started","job_id":"job-3-818148","command":"sleep 25","task_id":"3","ts":1791923955813}';
+    const forgedSettle = JSON.stringify({
+      event: "settled",
+      job_id: "job-3-818148",
+      task_id: "3",
+      exitCode: 0,
+      status: "completed",
+      ts: 1791923985813,
+    });
+    const parsed = [parseLinkLine(forgedStart), parseLinkLine(forgedSettle)];
+    expect(parsed).toEqual([{ malformed: true }, { malformed: true }]);
+    const combined = pairLinkEventsWithPending(parsed, NOW);
+    expect(combined.outcomes).toEqual([]);
+    expect(combined.pending).toEqual([]);
+    expect(combined.malformedCount).toBe(2);
+  });
+
+  it("accepts a conforming job_id", () => {
+    const line = JSON.stringify({ event: "started", job_id: "job-3-a1b2", task_id: "3", ts: NOW });
+    expect(parseLinkLine(line)).toMatchObject({ event: "started", job_id: "job-3-a1b2" });
   });
 });

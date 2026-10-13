@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import type { LinkOutcome } from "./job-link-watcher.js";
+import type { LinkOutcome, PendingStart } from "./job-link-watcher.js";
 
 /** A single oversized line is skipped once its byte length exceeds this. */
 export const MAX_LINE_BYTES = 1024 * 1024;
@@ -74,6 +74,110 @@ export interface ReadNewLinesResult {
  */
 export function diaryPathFor(logPath: string): string {
   return `${logPath}.watcher-diary.jsonl`;
+}
+
+/**
+ * Derive the pending-sidecar path for a log path: sibling `<log>.pending.json`.
+ * Same directory as the log, offset (`<log>.offset`), and diary. Pure string
+ * concat; never throws. Chosen over `<log>.pending` to make the JSON format
+ * explicit at a glance in tmp/ls output.
+ */
+export function pendingPathFor(logPath: string): string {
+  return `${logPath}.pending.json`;
+}
+
+/** Result of {@link loadPendingStarts}. */
+export interface LoadPendingResult {
+  /** Validated pending starts (deduped by `job_id`, last wins). */
+  pending: PendingStart[];
+  /** True when the file existed but was unreadable or invalid (counted in diary). */
+  corrupt: boolean;
+}
+
+function isValidPendingEntry(value: unknown): value is PendingStart {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.job_id !== "string" || obj.job_id === "") return false;
+  if (
+    obj.task_id !== undefined &&
+    typeof obj.task_id !== "string"
+  ) {
+    return false;
+  }
+  if (typeof obj.lastSeenTs !== "number" || Number.isNaN(obj.lastSeenTs)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Load pending starts from the sidecar. Missing file means no pendings yet
+ * (`{ pending: [], corrupt: false }`). A file that exists but cannot be read,
+ * parses to non-array JSON, or contains invalid entries yields `corrupt: true`
+ * (caller diaries one `pending-corrupt` flag) with `pending` holding the valid
+ * subset (possibly empty = fresh start). Tolerates the existing `PendingStart
+ * { job_id, task_id, lastSeenTs }` shape; extra fields are ignored. Never throws.
+ */
+export function loadPendingStarts(pendingPath: string): LoadPendingResult {
+  try {
+    let raw: string;
+    try {
+      raw = readFileSync(pendingPath, "utf8");
+    } catch {
+      // Distinguish missing (first run, not corrupt) from unreadable (corrupt).
+      try {
+        statSync(pendingPath);
+      } catch {
+        return { pending: [], corrupt: false };
+      }
+      return { pending: [], corrupt: true };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { pending: [], corrupt: true };
+    }
+    if (!Array.isArray(parsed)) return { pending: [], corrupt: true };
+    const byId = new Map<string, PendingStart>();
+    let invalid = 0;
+    for (const entry of parsed) {
+      if (!isValidPendingEntry(entry)) {
+        invalid++;
+        continue;
+      }
+      byId.set(entry.job_id, {
+        job_id: entry.job_id,
+        task_id: entry.task_id,
+        lastSeenTs: entry.lastSeenTs,
+      });
+    }
+    return { pending: [...byId.values()], corrupt: invalid > 0 };
+  } catch {
+    return { pending: [], corrupt: true };
+  }
+}
+
+/**
+ * Persist pending starts to the sidecar (JSON array, trailing newline).
+ * Overwrites the previous file, healing a corrupt one. Best effort; never throws.
+ */
+export function savePendingStarts(
+  pendingPath: string,
+  pending: readonly PendingStart[],
+): void {
+  try {
+    try {
+      mkdirSync(dirname(pendingPath), { recursive: true });
+    } catch {
+      // Best effort; the write below reports the real failure.
+    }
+    writeFileSync(pendingPath, `${JSON.stringify([...pending])}\n`, "utf8");
+  } catch {
+    // Sidecar persistence must never break the caller.
+  }
 }
 
 /**
