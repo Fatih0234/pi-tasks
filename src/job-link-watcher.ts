@@ -91,7 +91,12 @@ export type LinkOutcome =
     }
   | {
       kind: "flag";
-      reason: "duplicate-start" | "orphan-settle" | "unknown-task" | "late-settle";
+      reason:
+        | "duplicate-start"
+        | "orphan-settle"
+        | "unknown-task"
+        | "late-settle"
+        | "pending-corrupt";
       job_id: string;
       task_id?: string;
     };
@@ -187,9 +192,34 @@ function processLines(
   lines: readonly ParsedLinkLine[],
   now: number = 0,
   maxAgeMs: number = DEFAULT_MAX_AGE_MS,
+  initialPending?: readonly PendingStart[],
 ): { outcomes: LinkOutcome[]; pending: Map<string, PendingStart>; malformedCount: number } {
   const outcomes: LinkOutcome[] = [];
   const pending = new Map<string, PendingStart>();
+  // Seed from the previous turn's sidecar (deduped, last wins). Seeding is
+  // silent: disk duplicates never emit flags; only new lines flag against
+  // seeded entries (duplicate-start / pairing / late-settle exactly as today).
+  if (initialPending !== undefined) {
+    for (const entry of initialPending) {
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        typeof (entry as PendingStart).job_id !== "string" ||
+        (entry as PendingStart).job_id === "" ||
+        typeof (entry as PendingStart).lastSeenTs !== "number" ||
+        Number.isNaN((entry as PendingStart).lastSeenTs)
+      ) {
+        continue;
+      }
+      const taskId = (entry as PendingStart).task_id;
+      if (taskId !== undefined && typeof taskId !== "string") continue;
+      pending.set((entry as PendingStart).job_id, {
+        job_id: (entry as PendingStart).job_id,
+        task_id: taskId,
+        lastSeenTs: (entry as PendingStart).lastSeenTs,
+      });
+    }
+  }
   let malformedCount = 0;
 
   for (const line of lines) {
@@ -297,6 +327,29 @@ export function pairLinkEventsWithPending(
   maxAgeMs: number = DEFAULT_MAX_AGE_MS,
 ): PairResult {
   const { outcomes, pending, malformedCount } = processLines(lines, now, maxAgeMs);
+  return { outcomes, pending: [...pending.values()], malformedCount };
+}
+
+/**
+ * Pair new lines against pendings loaded from the previous turn's sidecar.
+ * Seeded entries behave exactly as if their `started` lines had arrived in
+ * this batch (same duplicate/orphan/late-settle predicates); only new lines
+ * can emit outcomes. Returns the same {@link PairResult} shape: outcomes plus
+ * the merged still-pending starts to save back. Never throws for well-formed
+ * inputs; invalid seed entries are skipped (see `processLines` seeding).
+ */
+export function pairLinkEventsWithInitialPending(
+  lines: readonly ParsedLinkLine[],
+  initialPending: readonly PendingStart[],
+  now: number,
+  maxAgeMs: number = DEFAULT_MAX_AGE_MS,
+): PairResult {
+  const { outcomes, pending, malformedCount } = processLines(
+    lines,
+    now,
+    maxAgeMs,
+    initialPending,
+  );
   return { outcomes, pending: [...pending.values()], malformedCount };
 }
 

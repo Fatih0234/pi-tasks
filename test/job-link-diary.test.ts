@@ -260,3 +260,138 @@ describe("job-link turn_start wiring (Task 4 dry-run)", () => {
     expect(entry.would_write).toBeNull();
   });
 });
+
+describe("job-link pending persistence across turns (pending fix)", () => {
+  const PENDING_SUFFIX = ".pending.json";
+  const HOUR_MS = 3600 * 1000;
+
+  it("(a) started in check N + settled in check N+1 pairs into ONE settled outcome, no orphan flag", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "event.log");
+    const diaryPath = diaryPathFor(logPath);
+    const now1 = 1_760_000_000_000;
+    const now2 = now1 + 5_000;
+    const startedLine = JSON.stringify({
+      event: "started",
+      job_id: "job-10-c050",
+      task_id: "smoke-1",
+      ts: now1,
+    });
+    const settledLine = JSON.stringify({
+      event: "settled",
+      job_id: "job-10-c050",
+      task_id: "smoke-1",
+      exitCode: 0,
+      status: "completed",
+      ts: now2,
+    });
+    writeFileSync(logPath, `${startedLine}\n`);
+    const store = {
+      get: (id: string) => (id === "smoke-1" ? { id } : undefined),
+    };
+    // Turn N: only the start is visible.
+    checkJobLinks(store, { logPath, now: now1 });
+    // Turn N+1: the settle arrives (fresh module state = second call relies on disk).
+    writeFileSync(logPath, `${startedLine}\n${settledLine}\n`);
+    checkJobLinks(store, { logPath, now: now2 });
+
+    const raw = readFileSync(diaryPath, "utf8").trimEnd().split("\n");
+    expect(raw).toHaveLength(1);
+    const entry = JSON.parse(raw[0]) as {
+      outcome: LinkOutcome;
+    };
+    expect(entry.outcome).toMatchObject({
+      kind: "settled",
+      job_id: "job-10-c050",
+      task_id: "smoke-1",
+    });
+    // No orphan flag anywhere in the diary.
+    for (const line of raw) {
+      const e = JSON.parse(line) as { outcome: LinkOutcome };
+      if (e.outcome.kind === "flag") {
+        expect(e.outcome.reason).not.toBe("orphan-settle");
+      }
+    }
+  });
+
+  it("(b) pending survives a corrupt sidecar (fresh start + counted event)", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "event.log");
+    const pendingPath = `${logPath}${PENDING_SUFFIX}`;
+    const diaryPath = diaryPathFor(logPath);
+    const now = 1_760_000_000_000;
+    // Corrupt sidecar: invalid JSON.
+    writeFileSync(pendingPath, "not json {{{\n");
+    const startedLine = JSON.stringify({
+      event: "started",
+      job_id: "job-11-beef",
+      task_id: "5",
+      ts: now - 1000,
+    });
+    const settledLine = JSON.stringify({
+      event: "settled",
+      job_id: "job-11-beef",
+      task_id: "5",
+      exitCode: 0,
+      status: "completed",
+      ts: now,
+    });
+    writeFileSync(logPath, `${startedLine}\n${settledLine}\n`);
+    const store = {
+      get: (id: string) => (id === "5" ? { id } : undefined),
+    };
+    expect(() => checkJobLinks(store, { logPath, now })).not.toThrow();
+
+    const raw = readFileSync(diaryPath, "utf8").trimEnd().split("\n");
+    const outcomes = raw.map(
+      (l) => (JSON.parse(l) as { outcome: LinkOutcome }).outcome,
+    );
+    // Corruption is counted in the diary...
+    expect(
+      outcomes.some(
+        (o) => o.kind === "flag" && o.reason === "pending-corrupt",
+      ),
+    ).toBe(true);
+    // ...and fresh pairing still works.
+    expect(
+      outcomes.some(
+        (o) =>
+          o.kind === "settled" &&
+          o.job_id === "job-11-beef" &&
+          o.task_id === "5",
+      ),
+    ).toBe(true);
+    // Sidecar is healed to valid JSON.
+    const healed = JSON.parse(readFileSync(pendingPath, "utf8")) as unknown;
+    expect(Array.isArray(healed)).toBe(true);
+  });
+
+  it("(c) expiry still fires for genuinely old pendings loaded from disk", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "event.log");
+    const pendingPath = `${logPath}${PENDING_SUFFIX}`;
+    const diaryPath = diaryPathFor(logPath);
+    const now = 1_760_000_000_000;
+    const oldTs = now - 25 * HOUR_MS;
+    writeFileSync(
+      pendingPath,
+      `${JSON.stringify([{ job_id: "job-99-aaaa", task_id: "7", lastSeenTs: oldTs }])}\n`,
+    );
+    // No new log growth: expiry must fire from disk alone.
+    writeFileSync(logPath, "");
+    const store = { get: (_id: string) => undefined };
+    checkJobLinks(store, { logPath, now });
+
+    expect(existsSync(diaryPath)).toBe(true);
+    const raw = readFileSync(diaryPath, "utf8").trimEnd().split("\n");
+    const outcomes = raw.map(
+      (l) => (JSON.parse(l) as { outcome: LinkOutcome }).outcome,
+    );
+    expect(outcomes).toContainEqual({
+      kind: "died-with-session",
+      job_id: "job-99-aaaa",
+      task_id: "7",
+      lastSeenTs: oldTs,
+    });
+  });
+});

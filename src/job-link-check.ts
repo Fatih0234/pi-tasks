@@ -12,13 +12,16 @@
 import {
   appendDiary,
   diaryPathFor,
+  loadPendingStarts,
+  pendingPathFor,
   readNewLines,
+  savePendingStarts,
 } from "./job-link-diary.js";
 import {
   applyExpiry,
   buildWouldWrite,
   type LinkOutcome,
-  pairLinkEventsWithPending,
+  pairLinkEventsWithInitialPending,
   parseLinkLine,
 } from "./job-link-watcher.js";
 
@@ -36,10 +39,13 @@ export interface CheckJobLinksOptions {
 
 /**
  * One dry-run pass: read new log lines past the stored offset, parse,
- * pair, expire, check task existence, append diary entries.
+ * pair (against last turn's pending sidecar), expire, check task existence,
+ * append diary entries, save pending back.
  *
  * Offset convention: sibling `<log>.offset` (Task 2 suggestion, adopted).
  * Diary path: `diaryPathFor(logPath)` (`<log>.watcher-diary.jsonl`).
+ * Pending sidecar: `pendingPathFor(logPath)` (`<log>.pending.json`) holding a
+ * JSON array of `PendingStart { job_id, task_id, lastSeenTs }`.
  *
  * Never throws.
  */
@@ -53,17 +59,45 @@ export function checkJobLinks(
     const now = opts?.now ?? Date.now();
     const offsetPath = `${logPath}.offset`;
     const diaryPath = diaryPathFor(logPath);
+    const pendingPath = pendingPathFor(logPath);
 
+    const { pending: diskPending, corrupt } = loadPendingStarts(pendingPath);
     const { lines } = readNewLines(logPath, offsetPath);
-    if (lines.length === 0) return;
+    if (lines.length === 0 && diskPending.length === 0 && !corrupt) return;
 
     const parsed = lines.map(parseLinkLine);
-    const { outcomes, pending } = pairLinkEventsWithPending(parsed, now);
+    const { outcomes, pending } = pairLinkEventsWithInitialPending(
+      parsed,
+      diskPending,
+      now,
+    );
     const expired = applyExpiry(pending, now);
     const all: LinkOutcome[] = [...outcomes, ...expired];
-    if (all.length === 0) return;
+
+    // Persist merged pendings minus expired (fire-once expiry) before
+    // diarying, healing a corrupt file to the fresh set. Best effort.
+    const expiredIds = new Set<string>();
+    for (const outcome of expired) {
+      if (outcome.kind === "died-with-session") expiredIds.add(outcome.job_id);
+    }
+    savePendingStarts(
+      pendingPath,
+      pending.filter((p) => !expiredIds.has(p.job_id)),
+    );
+
+    if (all.length === 0 && !corrupt) return;
 
     const toRecord: LinkOutcome[] = [];
+    // Corrupt-or-unreadable sidecar starts fresh (loader returned the valid
+    // subset) and counts the event here, same never-throw philosophy as
+    // rotation handling. Missing file is not corrupt (first run, no entry).
+    if (corrupt) {
+      toRecord.push({
+        kind: "flag",
+        reason: "pending-corrupt",
+        job_id: "pending-sidecar",
+      });
+    }
     for (const outcome of all) {
       if (outcome.kind !== "settled") {
         toRecord.push(outcome);
