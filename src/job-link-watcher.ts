@@ -108,10 +108,15 @@ export function isMalformedLine(value: ParsedLinkLine): value is MalformedLine {
   return (value as MalformedLine).malformed === true;
 }
 
+/** Real async-bash IDs are `job-<counter>-<4 lowercase hex>`
+ *  (`randomBytes(2).toString("hex")`). Anything else is forged or corrupt. */
+const JOB_ID_PATTERN = /^job-\d+-[0-9a-f]{4}$/;
+
 /**
  * Parse one raw log line. Returns the link line, or `{ malformed: true }`
  * for bad JSON or a well-formed JSON value with a missing/invalid `event`,
- * `job_id`, or `ts`. Never throws.
+ * `job_id`, or `ts`. `job_id` must match `^job-\\d+-[0-9a-f]{4}$`.
+ * Never throws.
  */
 export function parseLinkLine(line: string): ParsedLinkLine {
   let raw: unknown;
@@ -127,7 +132,7 @@ export function parseLinkLine(line: string): ParsedLinkLine {
   if (obj.event !== "started" && obj.event !== "settled") {
     return { malformed: true };
   }
-  if (typeof obj.job_id !== "string" || obj.job_id.length === 0) {
+  if (typeof obj.job_id !== "string" || !JOB_ID_PATTERN.test(obj.job_id)) {
     return { malformed: true };
   }
   if (typeof obj.ts !== "number" || Number.isNaN(obj.ts)) {

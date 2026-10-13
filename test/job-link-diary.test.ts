@@ -16,7 +16,7 @@ function makeTmpDir(): string {
 
 const SETTLED: LinkOutcome = {
   kind: "settled",
-  job_id: "job-abc123",
+  job_id: "job-1-ab12",
   task_id: "5",
   exitCode: 0,
   status: "completed",
@@ -26,7 +26,7 @@ const SETTLED: LinkOutcome = {
 const FLAG: LinkOutcome = {
   kind: "flag",
   reason: "orphan-settle",
-  job_id: "job-ghost",
+  job_id: "job-3-ef01",
   task_id: "3",
 };
 
@@ -100,7 +100,7 @@ describe("job-link diary (fs boundary)", () => {
     expect(settledEntry.would_write).toEqual({
       task_id: "5",
       metadata_key: "asyncBashOutcomes",
-      note: { job_id: "job-abc123", exitCode: 0, status: "completed", ts: 1_760_000_000_000 },
+      note: { job_id: "job-1-ab12", exitCode: 0, status: "completed", ts: 1_760_000_000_000 },
     });
 
     expect(typeof flagEntry.diary_ts).toBe("number");
@@ -163,13 +163,13 @@ describe("job-link turn_start wiring (Task 4 dry-run)", () => {
     const now = Date.now();
     const startedLine = JSON.stringify({
       event: "started",
-      job_id: "job-abc123",
+      job_id: "job-1-ab12",
       task_id: "5",
       ts: now - 1000,
     });
     const settledLine = JSON.stringify({
       event: "settled",
-      job_id: "job-abc123",
+      job_id: "job-1-ab12",
       task_id: "5",
       exitCode: 0,
       status: "completed",
@@ -189,7 +189,7 @@ describe("job-link turn_start wiring (Task 4 dry-run)", () => {
     const entry = JSON.parse(raw[0]) as Record<string, unknown>;
     expect(entry.outcome).toEqual({
       kind: "settled",
-      job_id: "job-abc123",
+      job_id: "job-1-ab12",
       task_id: "5",
       exitCode: 0,
       status: "completed",
@@ -198,7 +198,7 @@ describe("job-link turn_start wiring (Task 4 dry-run)", () => {
     expect(entry.would_write).toEqual({
       task_id: "5",
       metadata_key: "asyncBashOutcomes",
-      note: { job_id: "job-abc123", exitCode: 0, status: "completed", ts: now },
+      note: { job_id: "job-1-ab12", exitCode: 0, status: "completed", ts: now },
     });
   });
 
@@ -226,13 +226,13 @@ describe("job-link turn_start wiring (Task 4 dry-run)", () => {
     const now = Date.now();
     const startedLine = JSON.stringify({
       event: "started",
-      job_id: "job-throw",
+      job_id: "job-9-beef",
       task_id: "9",
       ts: now - 1000,
     });
     const settledLine = JSON.stringify({
       event: "settled",
-      job_id: "job-throw",
+      job_id: "job-9-beef",
       task_id: "9",
       exitCode: 0,
       status: "completed",
@@ -254,7 +254,7 @@ describe("job-link turn_start wiring (Task 4 dry-run)", () => {
     expect(entry.outcome).toEqual({
       kind: "flag",
       reason: "unknown-task",
-      job_id: "job-throw",
+      job_id: "job-9-beef",
       task_id: "9",
     });
     expect(entry.would_write).toBeNull();
