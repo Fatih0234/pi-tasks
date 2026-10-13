@@ -19,6 +19,7 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { AutoClearManager } from "./auto-clear.js";
+import { checkJobLinks } from "./job-link-check.js";
 import { ProcessTracker } from "./process-tracker.js";
 import {
   type CadenceConfig,
@@ -473,6 +474,11 @@ export default function (pi: ExtensionAPI) {
     if (autoClear.onTurnStart(cadence.currentTurn)) {
       if (isSessionScope()) deleteSessionFileIfEmpty();
       widget.update();
+    }
+    try {
+      checkJobLinks(store);
+    } catch {
+      // Dry-run watcher never breaks the turn.
     }
   });
 

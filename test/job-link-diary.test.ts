@@ -1,7 +1,8 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { checkJobLinks } from "../src/job-link-check.js";
 import {
   appendDiary,
   diaryPathFor,
@@ -133,5 +134,129 @@ describe("job-link diary (fs boundary)", () => {
     expect(() =>
       appendDiary(join(dir, "no-such-dir", "d.jsonl"), [SETTLED]),
     ).not.toThrow();
+  });
+});
+
+describe("job-link turn_start wiring (Task 4 dry-run)", () => {
+  const ENV_KEY = "PI_ASYNC_BASH_EVENT_LOG";
+  const originalEnv = process.env[ENV_KEY];
+
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = originalEnv;
+  });
+
+  function withEnv(value: string | undefined, fn: () => void): void {
+    if (value === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = value;
+    try {
+      fn();
+    } finally {
+      if (originalEnv === undefined) delete process.env[ENV_KEY];
+      else process.env[ENV_KEY] = originalEnv;
+    }
+  }
+
+  it("appends exactly one diary entry with the correct would_write for a fresh pair", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "event.log");
+    const now = Date.now();
+    const startedLine = JSON.stringify({
+      event: "started",
+      job_id: "job-abc123",
+      task_id: "5",
+      ts: now - 1000,
+    });
+    const settledLine = JSON.stringify({
+      event: "settled",
+      job_id: "job-abc123",
+      task_id: "5",
+      exitCode: 0,
+      status: "completed",
+      ts: now,
+    });
+    writeFileSync(logPath, `${startedLine}\n${settledLine}\n`);
+    const fakeStore = {
+      get: (id: string) => (id === "5" ? { id: "5" } : undefined),
+    };
+    withEnv(logPath, () => {
+      checkJobLinks(fakeStore, { now });
+    });
+
+    const diaryPath = diaryPathFor(logPath);
+    const raw = readFileSync(diaryPath, "utf8").trimEnd().split("\n");
+    expect(raw).toHaveLength(1);
+    const entry = JSON.parse(raw[0]) as Record<string, unknown>;
+    expect(entry.outcome).toEqual({
+      kind: "settled",
+      job_id: "job-abc123",
+      task_id: "5",
+      exitCode: 0,
+      status: "completed",
+      ts: now,
+    });
+    expect(entry.would_write).toEqual({
+      task_id: "5",
+      metadata_key: "asyncBashOutcomes",
+      note: { job_id: "job-abc123", exitCode: 0, status: "completed", ts: now },
+    });
+  });
+
+  it("does nothing and creates no files when the env var is unset", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "event.log");
+    const now = Date.now();
+    writeFileSync(
+      logPath,
+      `${JSON.stringify({ event: "started", job_id: "j1", task_id: "1", ts: now - 1000 })}\n`,
+    );
+    const diaryPath = diaryPathFor(logPath);
+    const offsetPath = `${logPath}.offset`;
+    const fakeStore = { get: (_id: string) => ({ id: _id }) };
+    withEnv(undefined, () => {
+      expect(() => checkJobLinks(fakeStore, { now })).not.toThrow();
+    });
+    expect(existsSync(diaryPath)).toBe(false);
+    expect(existsSync(offsetPath)).toBe(false);
+  });
+
+  it("swallows a throwing store and still writes the diary", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "event.log");
+    const now = Date.now();
+    const startedLine = JSON.stringify({
+      event: "started",
+      job_id: "job-throw",
+      task_id: "9",
+      ts: now - 1000,
+    });
+    const settledLine = JSON.stringify({
+      event: "settled",
+      job_id: "job-throw",
+      task_id: "9",
+      exitCode: 0,
+      status: "completed",
+      ts: now,
+    });
+    writeFileSync(logPath, `${startedLine}\n${settledLine}\n`);
+    const throwingStore = {
+      get: (_id: string): unknown => {
+        throw new Error("boom");
+      },
+    };
+    withEnv(logPath, () => {
+      expect(() => checkJobLinks(throwingStore, { now })).not.toThrow();
+    });
+    const diaryPath = diaryPathFor(logPath);
+    const raw = readFileSync(diaryPath, "utf8").trimEnd().split("\n");
+    expect(raw).toHaveLength(1);
+    const entry = JSON.parse(raw[0]) as Record<string, unknown>;
+    expect(entry.outcome).toEqual({
+      kind: "flag",
+      reason: "unknown-task",
+      job_id: "job-throw",
+      task_id: "9",
+    });
+    expect(entry.would_write).toBeNull();
   });
 });
