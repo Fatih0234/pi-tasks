@@ -12,11 +12,16 @@
  * - Lines without `task_id` yield nothing: they are neither paired nor
  *   tracked as pending, and never produce flags.
  * - Malformed lines are skipped and counted, never thrown.
- * - `started` without `settled` stays pending (expiry is Task 3).
- * - Task 1 never emits `died-with-session` (Task 3 expiry) or
- *   `unknown-task` (Task 4 task-existence check); both remain in the
- *   `LinkOutcome` union for those later tasks.
+ * - `started` without `settled` stays pending; `applyExpiry` (Task 3)
+ *   emits `died-with-session` for pending starts older than
+ *   `DEFAULT_MAX_AGE_MS`, and a `settled` that pairs with such a stale
+ *   start additionally yields a `late-settle` flag. Expiry only emits
+ *   outcomes the diary records — it never deletes information.
+ * - `unknown-task` remains reserved for the Task 4 task-existence check
+ *   (`buildWouldWrite`); the matcher itself never emits it.
  */
+
+import type { WouldWrite } from "./job-link-diary.js";
 
 /** A well-formed `started` log event. */
 export interface StartedLinkLine {
@@ -56,6 +61,19 @@ export interface PendingStart {
   lastSeenTs: number;
 }
 
+/**
+ * Default orphan horizon: a pending start older than this (relative to
+ * the injected `now`) counts as expired. Shared by `applyExpiry` and
+ * the late-settle detection in pairing so both apply the same rule.
+ */
+export const DEFAULT_MAX_AGE_MS = 24 * 3600 * 1000;
+
+/** Marker returned by {@link buildWouldWrite} when the outcome's task does
+ *  not exist. The caller must record a flag, never a write. */
+export interface UnknownTaskFlag {
+  flag: "unknown-task";
+}
+
 export type LinkOutcome =
   | {
       kind: "settled";
@@ -73,7 +91,7 @@ export type LinkOutcome =
     }
   | {
       kind: "flag";
-      reason: "duplicate-start" | "orphan-settle" | "unknown-task";
+      reason: "duplicate-start" | "orphan-settle" | "unknown-task" | "late-settle";
       job_id: string;
       task_id?: string;
     };
@@ -162,6 +180,8 @@ export function parseLinkLine(line: string): ParsedLinkLine {
 
 function processLines(
   lines: readonly ParsedLinkLine[],
+  now: number = 0,
+  maxAgeMs: number = DEFAULT_MAX_AGE_MS,
 ): { outcomes: LinkOutcome[]; pending: Map<string, PendingStart>; malformedCount: number } {
   const outcomes: LinkOutcome[] = [];
   const pending = new Map<string, PendingStart>();
@@ -196,9 +216,9 @@ function processLines(
       continue;
     }
 
-    // Settled event: task_id resolves verbatim from the settle line,
-    // falling back to the start line when the settle line omits it
-    // (parse keeps that case well-formed for forward compatibility).
+    // Settled event: the outcome `task_id` is verbatim the settle line's
+    // `task_id`. (Settle lines without `task_id` are skipped before
+    // tracking, so pairing only ever sees settles that carry one.)
     const start = pending.get(line.job_id);
     if (start === undefined) {
       outcomes.push({
@@ -218,6 +238,18 @@ function processLines(
       status: line.status ?? "unknown",
       ts: line.ts,
     });
+    // Late settle: the start was already past the orphan horizon when
+    // this batch was processed (it would have expired via applyExpiry
+    // had its settle not arrived here). Pair normally, and additionally
+    // flag it so the diary shows the job was declared dead first.
+    if (now - start.lastSeenTs > maxAgeMs) {
+      outcomes.push({
+        kind: "flag",
+        reason: "late-settle",
+        job_id: line.job_id,
+        task_id: line.task_id,
+      });
+    }
   }
 
   return { outcomes, pending, malformedCount };
@@ -225,16 +257,17 @@ function processLines(
 
 /**
  * Pair parsed link lines into outcomes. `started` without `settled`
- * stays pending (no outcome; see {@link getPendingStarts}). Malformed
- * entries are skipped. `now` is accepted for signature compatibility
- * with Task 3 expiry and is unused here.
+ * stays pending (no outcome; see {@link getPendingStarts} and
+ * {@link applyExpiry}). Malformed entries are skipped. A `settled` that
+ * pairs with a start already past `maxAgeMs` (relative to `now`) yields
+ * its `settled` outcome plus a `late-settle` flag.
  */
 export function pairLinkEvents(
   lines: readonly ParsedLinkLine[],
   now: number,
+  maxAgeMs: number = DEFAULT_MAX_AGE_MS,
 ): LinkOutcome[] {
-  void now;
-  return processLines(lines).outcomes;
+  return processLines(lines, now, maxAgeMs).outcomes;
 }
 
 /**
@@ -250,13 +283,72 @@ export function getPendingStarts(
 
 /**
  * Single-pass pairing for Task 3: outcomes, pending starts, and the
- * count of skipped malformed entries.
+ * count of skipped malformed entries. Late-settle detection uses the
+ * same `now`/`maxAgeMs` rule as {@link pairLinkEvents}.
  */
 export function pairLinkEventsWithPending(
   lines: readonly ParsedLinkLine[],
   now: number,
+  maxAgeMs: number = DEFAULT_MAX_AGE_MS,
 ): PairResult {
-  void now;
-  const { outcomes, pending, malformedCount } = processLines(lines);
+  const { outcomes, pending, malformedCount } = processLines(lines, now, maxAgeMs);
   return { outcomes, pending: [...pending.values()], malformedCount };
+}
+
+/**
+ * Emit `died-with-session` outcomes for pending starts older than
+ * `maxAgeMs` (strictly past age: `now - lastSeenTs > maxAgeMs`),
+ * defaulting to {@link DEFAULT_MAX_AGE_MS} (24 h). Fresh entries yield
+ * nothing and stay pending.
+ *
+ * Expiry never deletes information: this function only emits outcomes
+ * for the diary to record. It does not mutate `pending` — the caller
+ * keeps whatever entries it still wants to pair against, so a `settled`
+ * arriving after expiry still pairs normally (with a `late-settle`
+ * flag from pairing).
+ */
+export function applyExpiry(
+  pending: readonly PendingStart[],
+  now: number,
+  maxAgeMs: number = DEFAULT_MAX_AGE_MS,
+): LinkOutcome[] {
+  const outcomes: LinkOutcome[] = [];
+  for (const start of pending) {
+    if (now - start.lastSeenTs > maxAgeMs) {
+      outcomes.push({
+        kind: "died-with-session",
+        job_id: start.job_id,
+        task_id: start.task_id,
+        lastSeenTs: start.lastSeenTs,
+      });
+    }
+  }
+  return outcomes;
+}
+
+/**
+ * Build the dry-run write payload for one outcome. `settled` outcomes
+ * for an existing task yield the exact `WouldWrite` payload (key
+ * `asyncBashOutcomes`, note with job_id/exitCode/status/ts); `settled`
+ * outcomes whose task is unknown yield `{ flag: "unknown-task" }` —
+ * flagged, never written. Every other kind (`died-with-session`,
+ * `flag`) yields null: there is nothing to write, so the store is not
+ * consulted. `taskExists` exceptions propagate to the caller.
+ */
+export function buildWouldWrite(
+  outcome: LinkOutcome,
+  taskExists: (id: string) => boolean,
+): WouldWrite | UnknownTaskFlag | null {
+  if (outcome.kind !== "settled") return null;
+  if (!taskExists(outcome.task_id)) return { flag: "unknown-task" };
+  return {
+    task_id: outcome.task_id,
+    metadata_key: "asyncBashOutcomes",
+    note: {
+      job_id: outcome.job_id,
+      exitCode: outcome.exitCode,
+      status: outcome.status,
+      ts: outcome.ts,
+    },
+  };
 }

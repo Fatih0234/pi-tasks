@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyExpiry,
+  buildWouldWrite,
   getPendingStarts,
   isMalformedLine,
   pairLinkEvents,
@@ -130,5 +132,138 @@ describe("job link watcher (pure matcher)", () => {
     expect(combined.outcomes).toEqual([]);
     expect(combined.pending).toHaveLength(1);
     expect(combined.malformedCount).toBe(0);
+  });
+});
+
+describe("job link watcher expiry + would-write (Task 3)", () => {
+  const HOUR_MS = 3600 * 1000;
+
+  it("expires a 25 h old pending start as died-with-session", () => {
+    const lastSeenTs = NOW - 25 * HOUR_MS;
+    const outcomes = applyExpiry(
+      [{ job_id: "job-old", task_id: "5", lastSeenTs }],
+      NOW,
+    );
+    expect(outcomes).toEqual([
+      { kind: "died-with-session", job_id: "job-old", task_id: "5", lastSeenTs },
+    ]);
+  });
+
+  it("keeps a 1 h old pending start pending (no outcome)", () => {
+    const pending = [
+      { job_id: "job-fresh", task_id: "5", lastSeenTs: NOW - HOUR_MS },
+    ];
+    expect(applyExpiry(pending, NOW)).toEqual([]);
+  });
+
+  it("keeps a start exactly at the 24 h boundary pending (expiry is strictly past age)", () => {
+    const pending = [
+      { job_id: "job-edge", task_id: "5", lastSeenTs: NOW - 24 * HOUR_MS },
+    ];
+    expect(applyExpiry(pending, NOW)).toEqual([]);
+  });
+
+  it("honours an explicit maxAgeMs", () => {
+    const pending = [
+      { job_id: "job-x", task_id: "5", lastSeenTs: NOW - 2 * HOUR_MS },
+    ];
+    expect(applyExpiry(pending, NOW, HOUR_MS)).toHaveLength(1);
+    expect(applyExpiry(pending, NOW, 3 * HOUR_MS)).toEqual([]);
+  });
+
+  it("never deletes information: applyExpiry does not mutate its input", () => {
+    const pending = [
+      { job_id: "job-old", task_id: "5", lastSeenTs: NOW - 25 * HOUR_MS },
+      { job_id: "job-fresh", task_id: "6", lastSeenTs: NOW - HOUR_MS },
+    ];
+    const snapshot = JSON.parse(JSON.stringify(pending));
+    applyExpiry(pending, NOW);
+    expect(pending).toEqual(snapshot);
+  });
+
+  it("late settle pairs normally and additionally flags late-settle", () => {
+    const lines = [
+      parseLinkLine(started("job-late", "9", NOW - 25 * HOUR_MS)),
+      parseLinkLine(settled("job-late", "9", 0, "completed", NOW)),
+    ];
+    expect(pairLinkEvents(lines, NOW)).toEqual([
+      {
+        kind: "settled",
+        job_id: "job-late",
+        task_id: "9",
+        exitCode: 0,
+        status: "completed",
+        ts: NOW,
+      },
+      { kind: "flag", reason: "late-settle", job_id: "job-late", task_id: "9" },
+    ]);
+  });
+
+  it("fresh settle pairs with no late-settle flag", () => {
+    const lines = [
+      parseLinkLine(started("job-quick", "9", NOW - HOUR_MS)),
+      parseLinkLine(settled("job-quick", "9", 0, "completed", NOW)),
+    ];
+    expect(pairLinkEvents(lines, NOW)).toHaveLength(1);
+  });
+
+  it("buildWouldWrite yields the exact WouldWrite payload for an existing task", () => {
+    const seen: string[] = [];
+    const payload = buildWouldWrite(
+      {
+        kind: "settled",
+        job_id: "job-abc123",
+        task_id: "5",
+        exitCode: 0,
+        status: "completed",
+        ts: NOW,
+      },
+      (id) => {
+        seen.push(id);
+        return true;
+      },
+    );
+    expect(payload).toEqual({
+      task_id: "5",
+      metadata_key: "asyncBashOutcomes",
+      note: { job_id: "job-abc123", exitCode: 0, status: "completed", ts: NOW },
+    });
+    expect(seen).toEqual(["5"]);
+  });
+
+  it("buildWouldWrite flags unknown-task for a missing task (never a payload)", () => {
+    const payload = buildWouldWrite(
+      {
+        kind: "settled",
+        job_id: "job-gone",
+        task_id: "404",
+        exitCode: 0,
+        status: "completed",
+        ts: NOW,
+      },
+      () => false,
+    );
+    expect(payload).toEqual({ flag: "unknown-task" });
+  });
+
+  it("buildWouldWrite yields null for non-settled outcomes without consulting the store", () => {
+    let calls = 0;
+    const taskExists = () => {
+      calls++;
+      return true;
+    };
+    expect(
+      buildWouldWrite(
+        { kind: "died-with-session", job_id: "j", task_id: "5", lastSeenTs: NOW },
+        taskExists,
+      ),
+    ).toBeNull();
+    expect(
+      buildWouldWrite(
+        { kind: "flag", reason: "orphan-settle", job_id: "j", task_id: "5" },
+        taskExists,
+      ),
+    ).toBeNull();
+    expect(calls).toBe(0);
   });
 });
