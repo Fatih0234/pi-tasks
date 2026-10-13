@@ -335,14 +335,40 @@ describe("TaskExecute", () => {
     expect(result.content[0].text).toContain("#999: not found");
   });
 
-  it("rejects tasks without agentType", async () => {
+  it("defaults agentType to general-purpose so plain tasks still spawn", async () => {
     await mock.executeTool("TaskCreate", {
-      subject: "No agent type",
-      description: "Plain task",
+      subject: "Plain task",
+      description: "No agentType parameter",
     });
 
     const result = await mock.executeTool("TaskExecute", { task_ids: ["1"] });
-    expect(result.content[0].text).toContain("#1: no agentType set");
+    expect(result.content[0].text).toContain("Launched 1 agent");
+    expect(rpc.spawned).toHaveLength(1);
+    expect(rpc.spawned[0].type).toBe("general-purpose");
+  });
+
+  it("rejects legacy tasks without agentType, with a run-it-directly hint", async () => {
+    // TaskCreate defaults agentType now, so a task without it can only come from
+    // older data. Seed one directly in a store file, bypassing the tool.
+    const directory = mkdtempSync(join(tmpdir(), "pi-tasks-legacy-"));
+    const taskFile = join(directory, "tasks.json");
+    try {
+      new TaskStore(taskFile).create("Legacy task", "Created before agentType existed");
+      process.env.PI_TASKS = taskFile;
+
+      const legacyMock = mockPi();
+      const legacyRpc = installSubagentsMock(legacyMock.pi);
+      initExtension(legacyMock.pi as any);
+
+      const result = await legacyMock.executeTool("TaskExecute", { task_ids: ["1"] });
+      expect(result.content[0].text).toContain("#1: no agentType set");
+      expect(result.content[0].text).toContain("run the work directly");
+
+      legacyRpc.unsub();
+    } finally {
+      process.env.PI_TASKS = "off";
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects non-pending tasks", async () => {
@@ -437,6 +463,9 @@ describe("TaskExecute", () => {
       subject: "No agent type",
       description: "Desc",
     });
+    // TaskCreate defaults agentType — strip it the documented way (metadata
+    // merge, null deletes) to reproduce the legacy no-agentType state.
+    await mock.executeTool("TaskUpdate", { taskId: "2", metadata: { agentType: null } });
 
     const result = await mock.executeTool("TaskExecute", { task_ids: ["1", "2", "999"] });
     const text = result.content[0].text;
@@ -878,7 +907,7 @@ describe("RPC protocol correctness", () => {
     rpc.unsub();
   });
 
-  it("stop RPC returns false on error (agent not found) without throwing", async () => {
+  it("stop RPC failure on error (agent not found) throws and keeps in_progress", async () => {
     const mock = mockPi();
     const rpc = installSubagentsMock(mock.pi);
     initExtension(mock.pi as any);
@@ -894,14 +923,16 @@ describe("RPC protocol correctness", () => {
     // Clear spawned list so the mock's stop handler won't find the agent
     rpc.spawned.length = 0;
 
-    // TaskStop should still succeed (stopSubagent catches the error)
-    const result = await mock.executeTool("TaskStop", { task_id: "1" });
-    expect(result.content[0].text).toContain("stopped successfully");
+    // TaskStop must not report success: the stop was refused, agent may be live.
+    await expect(mock.executeTool("TaskStop", { task_id: "1" }))
+      .rejects.toThrow("Failed to stop agent agent-1 for task #1");
+    const get = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(get.content[0].text).toContain("Status: in_progress");
 
     rpc.unsub();
   });
 
-  it("stop RPC returns false on timeout without throwing", async () => {
+  it("stop RPC timeout throws and keeps in_progress", async () => {
     const mock = mockPi();
     initExtension(mock.pi as any);
 
@@ -922,11 +953,15 @@ describe("RPC protocol correctness", () => {
 
     vi.useFakeTimers();
     const stopPromise = mock.executeTool("TaskStop", { task_id: "1" });
+    // Attach the rejection handler before advancing: otherwise the timeout
+    // rejection fires with no handler attached and reads as unhandled.
+    const assertion = expect(stopPromise).rejects.toThrow("Failed to stop agent ghost-agent for task #1");
     await vi.advanceTimersByTimeAsync(11000);
 
-    // Should resolve (not throw) — stopSubagent catches timeout
-    const result = await stopPromise;
-    expect(result.content[0].text).toContain("stopped successfully");
+    // Must reject (not resolve): an unanswered stop is not a successful stop.
+    await assertion;
+    const get = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(get.content[0].text).toContain("Status: in_progress");
 
     vi.useRealTimers();
   });

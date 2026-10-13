@@ -19,6 +19,7 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { AutoClearManager } from "./auto-clear.js";
+import { checkJobLinks } from "./job-link-check.js";
 import { ProcessTracker } from "./process-tracker.js";
 import {
   type CadenceConfig,
@@ -108,6 +109,7 @@ function buildSystemReminder(tasks: Task[]): string {
       status: t.status,
     };
     if (t.activeForm) item.activeForm = sanitizeField(t.activeForm);
+    if (t.metadata?.agentType) item.agentType = sanitizeField(t.metadata.agentType);
     return item;
   });
 
@@ -117,11 +119,17 @@ function buildSystemReminder(tasks: Task[]): string {
     ? `${prefix} Here are your most relevant tasks (list truncated):`
     : `${prefix} Here are the latest contents of your task list:`;
 
+  // Pending delegable work deserves steering: such tasks can run as subagents via
+  // TaskExecute, so nudge the model to delegate instead of doing the work itself.
+  const closing = shown.some(t => t.status === "pending" && t.metadata?.agentType)
+    ? "Pending tasks with an agentType can be started via TaskExecute — delegate rather than executing them yourself."
+    : "Continue on with the tasks at hand if applicable.";
+
   return [
     "<system-reminder>",
     header,
     "",
-    `${JSON.stringify(items)}.${overflow} Continue on with the tasks at hand if applicable.`,
+    `${JSON.stringify(items)}.${overflow} ${closing}`,
     "</system-reminder>",
   ].join("\n");
 }
@@ -210,9 +218,11 @@ export default function (pi: ExtensionAPI) {
       .then(d => { debug("spawn:ok", d); return d.id; });
   }
 
-  /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
+  /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension).
+   *  Rejects when the stop is refused or times out — callers must not treat the
+   *  agent as stopped until this resolves (issues #46/#69). */
   function stopSubagent(agentId: string): Promise<void> {
-    return rpcCall<void>("subagents:rpc:stop", { agentId }, 10_000).catch(() => {});
+    return rpcCall<void>("subagents:rpc:stop", { agentId }, 10_000);
   }
 
   /** Tell subagents its result has been handed to the model, which suppresses the
@@ -465,6 +475,11 @@ export default function (pi: ExtensionAPI) {
       if (isSessionScope()) deleteSessionFileIfEmpty();
       widget.update();
     }
+    try {
+      checkJobLinks(store);
+    } catch {
+      // Dry-run watcher never breaks the turn.
+    }
   });
 
   // The end of a run is the only signal that separates a new batch of tasks from the
@@ -595,6 +610,13 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // Stop the spinner interval when the session ends. A live interval keeps the
+  // event loop busy, so `pi -p` never exits once a task has been in progress.
+  // new/resume/fork re-run session_start, whose update() restarts it if needed.
+  pi.on("session_shutdown", async () => {
+    widget.dispose();
+  });
+
   // Fallback for hosts that init UI lazily. Guarded by persistedTasksShown, so
   // it never double-renders after session_start.
   pi.on("before_agent_start", async (_event, ctx) => {
@@ -664,7 +686,7 @@ All tasks are created with status \`pending\`.
 - Include enough detail in the description for another agent to understand and complete the task
 - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
 - Check TaskList first to avoid creating duplicate tasks
-- Include \`agentType\` (e.g., "general-purpose", "Explore") to mark tasks for subagent execution via TaskExecute
+- Include \`agentType\` (e.g., "general-purpose", "Explore") to mark tasks for subagent execution via TaskExecute — defaults to "general-purpose"
 - To create several tasks at once, call TaskCreate multiple times in a single response — independent tool calls run in parallel, so the whole batch is created in one turn (one task per call).`,
     promptGuidelines: [
       "When working on complex multi-step tasks, use TaskCreate to track progress and TaskUpdate to update status.",
@@ -675,7 +697,7 @@ All tasks are created with status \`pending\`.
       subject: Type.String({ description: "A brief title for the task" }),
       description: Type.String({ description: "A detailed description of what needs to be done" }),
       activeForm: Type.Optional(Type.String({ description: "Present continuous form shown in spinner when in_progress (e.g., 'Running tests')" })),
-      agentType: Type.Optional(Type.String({ description: "Agent type for subagent execution (e.g., 'general-purpose', 'Explore'). Tasks with agentType can be started via TaskExecute." })),
+      agentType: Type.Optional(Type.String({ description: "Agent type for subagent execution (e.g., 'general-purpose', 'Explore'). Defaults to 'general-purpose' so tasks can be started via TaskExecute." })),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary metadata to attach to the task" })),
     }),
 
@@ -685,7 +707,9 @@ All tasks are created with status \`pending\`.
       // right after its last completion freezes one mid-count.
       autoClear.startNewBatch();
       const meta = params.metadata ?? {};
-      if (params.agentType) meta.agentType = params.agentType;
+      // Default rather than opt-in: an explicit type ("Explore") wins, but a plain
+      // task is still delegable to TaskExecute instead of being rejected there.
+      meta.agentType = params.agentType || "general-purpose";
       const task = store.create(params.subject, params.description, params.activeForm, Object.keys(meta).length > 0 ? meta : undefined);
       widget.update();
       return Promise.resolve(textResult(`Task #${task.id} created successfully: ${task.subject}`));
@@ -792,7 +816,7 @@ Returns full task details:
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const task = store.get(params.taskId);
-      if (!task) return Promise.resolve(textResult(`Task not found`));
+      if (!task) throw new Error(`Task #${sanitizeField(String(params.taskId)).slice(0, 100)} not found`);
 
       // Unescape literal \n sequences the LLM may have double-escaped in JSON
       const desc = task.description.replace(/\\n/g, "\n");
@@ -935,7 +959,7 @@ Set up task dependencies:
       const { task, changedFields, warnings } = store.update(taskId, fields);
 
       if (changedFields.length === 0 && !task) {
-        return Promise.resolve(textResult(`Task #${taskId} not found`));
+        throw new Error(`Task #${sanitizeField(String(taskId)).slice(0, 100)} not found`);
       }
 
       // Update widget active task tracking
@@ -1085,9 +1109,15 @@ Set up task dependencies:
         }
         const task = store.get(resolvedId);
         if (task?.metadata?.agentId && task.status === "in_progress") {
+          // Commit the completion only after the stop lands: the stop RPC going
+          // unanswered must not read as success with the agent still running.
+          try {
+            await stopSubagent(task.metadata.agentId);
+          } catch (err: any) {
+            throw new Error(`Failed to stop agent ${task.metadata.agentId} for task #${resolvedId}: ${err.message}`);
+          }
           store.update(resolvedId, { status: "completed" });
           autoClear.trackCompletion(resolvedId, cadence.currentTurn);
-          await stopSubagent(task.metadata.agentId);
           widget.setActiveTask(resolvedId, false);
           widget.update();
           return textResult(`Task #${resolvedId} stopped successfully`);
@@ -1125,7 +1155,7 @@ Set up task dependencies:
 - **model**: Model override for agents (e.g., "sonnet", "haiku")
 - **max_turns**: Maximum turns per agent`,
     promptGuidelines: [
-      "Never use the Agent tool for tasks launched via TaskExecute — agents are already running.",
+      "Do not spawn a duplicate Agent for a task that is already running under TaskExecute — use TaskOutput to check on it instead.",
     ],
     parameters: Type.Object({
       task_ids: Type.Array(Type.String(), { description: "Task IDs to execute as subagents" }),
@@ -1157,7 +1187,7 @@ Set up task dependencies:
           continue;
         }
         if (!task.metadata?.agentType) {
-          results.push(`#${taskId}: no agentType set — create with agentType parameter or update metadata`);
+          results.push(`#${taskId}: no agentType set — create with agentType parameter, update metadata, or run the work directly (e.g. via the Agent tool) since no subagent is running for it`);
           continue;
         }
 

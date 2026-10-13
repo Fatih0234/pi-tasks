@@ -247,3 +247,38 @@ describe("TaskStop", () => {
     expect(rpc.stopped).toEqual([]);
   });
 });
+
+describe("TaskStop stop-RPC failure (#46/#69)", () => {
+  let mock: ReturnType<typeof mockPi>;
+  let rpc: ReturnType<typeof installSubagentsMock>;
+
+  beforeEach(() => {
+    mock = mockPi();
+    rpc = installSubagentsMock(mock.pi, { stopError: "Agent not found" });
+    initExtension(mock.pi as any);
+  });
+
+  afterEach(() => { rpc.unsub(); });
+
+  it("throws and keeps the task in_progress when the stop RPC fails", async () => {
+    await launchAgentTask(mock);
+    await expect(mock.executeTool("TaskStop", { task_id: "1" }))
+      .rejects.toThrow("Failed to stop agent agent-1 for task #1");
+    expect(rpc.stopped).toEqual([]);
+    const get = await mock.executeTool("TaskGet", { taskId: "1" });
+    expect(get.content[0].text).toContain("Status: in_progress");
+  });
+
+  it("succeeds on retry once the stop RPC answers", async () => {
+    await launchAgentTask(mock);
+    await expect(mock.executeTool("TaskStop", { task_id: "1" })).rejects.toThrow("Failed to stop");
+
+    rpc.unsub();
+    rpc = installSubagentsMock(mock.pi);
+    // Reinstalling the mock resets its agent registry, so reset and relaunch first.
+    await mock.executeTool("TaskUpdate", { taskId: "1", status: "pending" });
+    await mock.executeTool("TaskExecute", { task_ids: ["1"] });
+    const res = await mock.executeTool("TaskStop", { task_id: "1" });
+    expect(res.content[0].text).toBe("Task #1 stopped successfully");
+  });
+});
