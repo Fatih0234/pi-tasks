@@ -1,4 +1,4 @@
-# Job-link watcher pilot (dry-run): diary guide and graduation bar
+# Job-link watcher pilot (dry-run): diary guide and go-live bar
 
 The job-link watcher matches async-bash background jobs to pi-tasks tasks
 via the `task_id` link recorded on the async-bash JSONL event log. During
@@ -44,7 +44,7 @@ One JSON object per line:
 - `outcome`: the verbatim matcher outcome. `kind` is `settled`,
   `died-with-session`, or `flag` (`duplicate-start`, `orphan-settle`,
   `unknown-task`, `late-settle`).
-- `would_write`: the payload a graduated watcher *would* store, or `null`
+- `would_write`: the payload a live watcher *would* store, or `null`
   when there is nothing to write (`died-with-session` and every `flag`
   record `null`). For `settled` outcomes of existing tasks it is
   `{ task_id, metadata_key: "asyncBashOutcomes", note: { job_id, exitCode,
@@ -57,7 +57,7 @@ reminder state changed.
 ## How to read the diary
 
 1. Each line is one outcome. `outcome.kind === "settled"` with a non-null
-   `would_write` means "on graduation this would have appended `note` to
+   `would_write` means "on going live this would have appended `note` to
    `metadata.asyncBashOutcomes` on task `task_id`".
 2. `outcome.kind === "flag"` lines are matcher diagnostics, not errors:
    `duplicate-start` (job started twice), `orphan-settle` (settle with no
@@ -101,9 +101,9 @@ rm -f "<log>.watcher-diary.jsonl" "<log>.offset"
 
 No code changes are needed to stand the pilot down.
 
-## Graduation bar
+## Go-live bar
 
-Graduate the watcher from observing to acting only when ALL of the
+Move the watcher from observing to acting only when ALL of the
 following hold:
 
 (a) >= 20 linked `settled` outcomes observed in the diary.
@@ -114,8 +114,8 @@ following hold:
 (d) 0 watcher-caused errors in the logs (no diary/offset I/O failures,
     no hook exceptions attributable to the watcher).
 
-Acting scope when graduated: on `settled`, append `note` to
+Acting scope when live: on `settled`, append `note` to
 `metadata.asyncBashOutcomes` on the linked task. Reminder stand-down is
 decided THEN, not now: this pilot grants no authority to change reminder
-cadence, auto-clear, or widget behaviour, and graduation must re-decide
+cadence, auto-clear, or widget behaviour, and going live must re-decide
 that scope explicitly.
